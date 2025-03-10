@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Assistant</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' fill='%233498db'><path d='M50 10 L70 40 L30 40 Z M40 50 L60 50 L50 80 Z'/></svg>">
+    <script src="/socket.io/socket.io.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="page-container">
+        <main class="container">
+            <header>
+                <h1>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                        <line x1="12" x2="12" y1="19" y2="22"/>
+                    </svg>
+                    Voice Assistant
+                </h1>
+            </header>
+
+            <section class="transcription-controls">
+                <div class="status" role="status">
+                    <span id="statusText">Not recording</span> 
+                    <span id="statusIndicator" aria-hidden="true">⚪</span>
+                </div>
+
+                <div class="button-container">
+                    <button id="startButton" aria-label="Start Transcription">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                        </svg>
+                        Start
+                    </button>
+                    <button id="stopButton" aria-label="Stop Transcription">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="6" y="4" width="12" height="16" rx="2"></rect>
+                        </svg>
+                        Stop
+                    </button>
+                    <button id="clearButton" aria-label="Clear Transcript">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            <line x1="10" y1="11" x2="10" y2="17"></line>
+                            <line x1="14" y1="11" x2="14" y2="17"></line>
+                        </svg>
+                        Clear
+                    </button>
+                </div>
+
+                <section class="transcript-container">
+                    <h2 class="sr-only">Conversation Output</h2>
+                    <div id="transcript" aria-live="polite"></div>
+                </section>
+            </section>
+
+            <footer class="footer">
+                <p>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                    © 2024 Voice Assistant App
+                </p>
+            </footer>
+            
+            <div class="audio-permissions-notice">
+                <p>Note: This app requires microphone permissions to function.</p>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const socket = io();
+        let audioContext;
+        let audioInput;
+        let processor;
+        let stream; // Store the media stream to reuse
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const clearButton = document.getElementById('clearButton');
+        const statusText = document.getElementById('statusText');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const transcript = document.getElementById('transcript');
+
+        let currentTranscript = '';
+        let lastFinalIndex = 0;
+        let isPlaying = false;
+        let isRunning = false;
+
+        startButton.addEventListener('click', startAssistant);
+        stopButton.addEventListener('click', stopAssistant);
+        clearButton.addEventListener('click', clearTranscript);
+
+        function updateStatus(status) {
+            console.log('Status updated:', status);
+            statusText.textContent = status;
+            statusIndicator.textContent = status === 'Recording' ? '🔴' : status === 'Speaking' ? '🔊' : '⚪';
+        }
+
+        async function startAssistant() {
+            if (isRunning) return;
+            console.log('Start button clicked');
+            isRunning = true;
+            await startRecording();
+        }
+
+        async function startRecording() {
+            if (isPlaying) return; // Prevent recording during playback
+            try {
+                if (!stream) {
+                    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    console.log('Microphone access granted');
+                }
+                audioContext = new AudioContext();
+                audioInput = audioContext.createMediaStreamSource(stream);
+                processor = audioContext.createScriptProcessor(1024, 1, 1);
+                audioInput.connect(processor);
+                processor.connect(audioContext.destination);
+
+                processor.onaudioprocess = (e) => {
+                    const float32Array = e.inputBuffer.getChannelData(0);
+                    const int16Array = new Int16Array(float32Array.length);
+                    for (let i = 0; i < float32Array.length; i++) {
+                        int16Array[i] = Math.max(-32768, Math.min(32767, Math.floor(float32Array[i] * 32768)));
+                    }
+                    socket.emit('audioData', int16Array.buffer);
+                };
+
+                socket.emit('startTranscription');
+                updateStatus('Recording');
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+                updateStatus('Error: ' + error.message);
+                isRunning = false;
+            }
+        }
+
+        function stopRecording() {
+            if (audioContext && audioContext.state !== 'closed') {
+                audioInput.disconnect();
+                processor.disconnect();
+                audioContext.close();
+            }
+        }
+
+        function stopAssistant() {
+            console.log('Stop button clicked');
+            stopRecording();
+            socket.emit('stopTranscription');
+            updateStatus('Not recording');
+            isRunning = false;
+        }
+
+        function clearTranscript() {
+            console.log('Clear button clicked');
+            currentTranscript = '';
+            lastFinalIndex = 0;
+            transcript.textContent = '';
+        }
+
+        socket.on('transcription', data => {
+            if (data.isFinal) {
+                currentTranscript += `You: ${data.text}\n`;
+                lastFinalIndex = currentTranscript.length;
+                transcript.textContent = currentTranscript;
+            } else {
+                const partialTranscript = currentTranscript + data.text;
+                transcript.textContent = partialTranscript;
+            }
+        });
+
+        socket.on('audioResponse', (audioBuffer) => {
+            console.log('Received audio response from server');
+            stopRecording(); // Mute microphone during playback
+            isPlaying = true;
+            updateStatus('Speaking');
+
+            const blob = new Blob([audioBuffer], { type: 'audio/mp3' });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.play();
+            transcript.textContent = currentTranscript + 'Assistant: Speaking...\n';
+
+            audio.onended = () => {
+                isPlaying = false;
+                transcript.textContent = currentTranscript;
+                if (isRunning) {
+                    startRecording(); // Automatically resume recording
+                } else {
+                    updateStatus('Not recording');
+                }
+            };
+        });
+
+        socket.on('error', errorMessage => {
+            console.error('Server error:', errorMessage);
+            transcript.textContent += '\nError: ' + errorMessage;
+            stopRecording();
+            updateStatus('Not recording');
+            isRunning = false;
+        });
+
+        console.log('Client-side script loaded');
+    </script>
+</body>
+</html>
